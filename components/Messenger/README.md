@@ -1,13 +1,14 @@
 # BlueTooth Receiver Component (ESP32)
 
-This is a Bluetooth Low Energy (BLE) receiver component designed for the ESP32. It bypasses standard Bluedroid or NimBLE stacks, communicating directly with the controller via the ESP32's **HCI (Host Controller Interface)**. This achieves ultra-low latency and precise parsing of advertising packets.
+This is a Bluetooth Low Energy (BLE) receiver component designed for the ESP32. It bypasses standard Bluedroid or NimBLE stacks, communicating directly with the controller via the ESP32's **HCI (Host Controller Interface)**. This achieves ultra-low latency, precise parsing of advertising packets, and includes a **bidirectional ACK mechanism**.
 
-Its primary function is for multi-device synchronization systems. The receiver scans for specific BLE advertising packets, parses commands and timestamps, and utilizes `esp_timer` to trigger `Player` actions at precise moments.
+Its primary function is for multi-device synchronization systems. The receiver scans for specific BLE advertising packets, parses commands, sends an acknowledgment (ACK), and utilizes `esp_timer` to trigger `Player` actions at precise moments.
 
 ## ✨ Features
 
 * **Low Latency Parsing**: Performs rapid parsing of advertising packets (`fast_parse_and_trigger`) directly within the VHCI callback function (ISR context).
 * **Precise Synchronization**: Includes synchronization window logic (`sync_process_task`) to collect multiple advertising packets and calculate the average trigger time, eliminating the variance caused by wireless transmission latency.
+* **ACK Feedback Mechanism**: Upon locking a command, the device temporarily switches from Scanner to Advertiser to broadcast an ACK packet, confirming receipt to the sender.
 * **Target Filtering**: Supports filtering by `Manufacturer ID` and `Target Mask` (bitmask), allowing commands to be targeted at a single device or a group of devices.
 * **Command Queueing**: Manages concurrent action commands using FreeRTOS Queues and Timers.
 
@@ -19,7 +20,8 @@ Messenger/
 ├── include/
 │   └── bt_receiver.h       # External API interface and structure definitions
 └── src/
-    └── bt_receiver.cpp     # Core implementation (HCI commands, ISR parsing, sync logic)
+    └── bt_receiver.cpp     # Core implementation (HCI commands, ISR parsing, sync logic, ACK task)
+
 ```
 
 ## 🛠 Dependencies
@@ -40,10 +42,10 @@ void app_main(void) {
     // Define receiver configuration
     bt_receiver_config_t config = {
         .feedback_gpio_num = -1,     // Debug GPIO (Set to -1 if unused)
-        .manufacturer_id = 0xABCD,   // Must match the Sender's Manufacturer ID
+        .manufacturer_id = 0xFFFF,   // Must match the Sender's Manufacturer ID
         .my_player_id = 0,           // This device's ID (Used for Target Mask check)
-        .sync_window_us = 20000,     // Sync window size in microseconds (e.g., 20ms)
-        .queue_size = 10             // Depth of the command queue
+        .sync_window_us = 500000,    // Sync window size (e.g., 500ms)
+        .queue_size = 20             // Depth of the command queue
     };
 
     // Initialize the receiver
@@ -62,7 +64,9 @@ If you need to stop scanning and timers:
 bt_receiver_stop();
 ```
 
-## 📡 Protocol Definition (Manufacturer Specific Data)
+## 📡 Protocol Definition
+
+### 1. Received Packet (From Sender)
 
 The receiver parses the `AD Type = 0xFF` (Manufacturer Specific Data) section within the BLE advertising packet.
 The data payload format is as follows:
@@ -75,6 +79,19 @@ The data payload format is as follows:
 | 11 | 4 | **Delay** | Big Endian, execution delay (us) |
 | 15 | 4 | **Prep Time** | Big Endian, preparation time |
 | 19 | 3 | **Data** | Extra parameters (e.g., test data) |
+
+### 2. Transmitted ACK Packet (To Sender)
+
+When a command is locked, the receiver broadcasts an ACK packet (Type `0x08`) for a short duration (approx. 50ms).
+
+| Offset | Length | Description | Notes |
+| --- | --- | --- | --- |
+| 0 | 2 | **Manufacturer ID** | `0xFFFF` |
+| 2 | 1 | **Packet Type** | `0x08` (CMD_TYPE_ACK) |
+| 3 | 1 | **My ID** | The `my_player_id` of this device |
+| 4 | 1 | **CMD ID** | The ID of the command being acknowledged |
+| 5 | 1 | **CMD Type** | The action type being acknowledged |
+| 6 | 4 | **Delay** | Big Endian, the locked delay value |
 
 ### Supported Command Types (CMD_TYPE)
 
@@ -97,7 +114,12 @@ Based on the `timer_timeout_cb` implementation:
     * Receives packets from the Queue.
     * Collects all packets with the same `CMD_ID` within the `sync_window_us` period.
     * Calculates the average `target_execution_time` (Reception Time + Packet Delay) to reduce error.
-5.  **Timed Execution**: Sets an `esp_timer` to trigger at the calculated time; the callback function calls the corresponding API of the `Player`.
+5. **ACK Feedback (`send_ack_task`)**:
+    * Upon locking a command, the system **pauses scanning**.
+    * It configures the radio to **advertise** the ACK packet.
+    * It broadcasts the ACK for a short duration (e.g., 50ms) to minimize the "deaf window."
+    * Finally, it stops advertising and **resumes scanning**.
+6.  **Timed Execution**: Sets an `esp_timer` to trigger at the calculated time; the callback function calls the corresponding API of the `Player`.
 
 ## ⚠️ Notes
 
