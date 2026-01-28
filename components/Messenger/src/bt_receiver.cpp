@@ -1,6 +1,5 @@
 /*
  * bt_receiver.cpp
- * Robust Version: Type 0 + Stop Scan First
  */
 
 #include "bt_receiver.h"
@@ -215,7 +214,6 @@ static void send_ack_task(void *arg) {
     // Start Adv
     hci_cmd_send_ble_adv_enable(1);
     
-    // Broadcast for 4 Seconds?
     vTaskDelay(pdMS_TO_TICKS(50));
     
     // Stop Adv
@@ -307,34 +305,34 @@ static void IRAM_ATTR timer_timeout_cb(void* arg) {
     uint8_t test_data[3];
     memcpy(test_data, (const uint8_t*)slot->ctx.data, 3);
     printf(">> [ACTION TRIGGERED] CMD: 0x%02X\n", cmd);
-    // switch(cmd) {
-    //     case 0x01:
-    //         Player::getInstance().play();
-    //         break;
-    //     case 0x02:
-    //         Player::getInstance().pause();
-    //         break;
-    //     case 0x03:
-    //         Player::getInstance().reset();
-    //         break;
-    //     case 0x04:
-    //         Player::getInstance().release();
-    //         break;
-    //     case 0x05:
-    //         Player::getInstance().load();
-    //         break;
-    //     case 0x06:
-    //         Player::getInstance().test(test_data[0], test_data[1], test_data[2]);
-    //         break;
-    //     // --- Cancel Command ---
-    //     case 0x07: {
-    //         esp_timer_stop(s_slots[test_data[0]].timer_handle);
-    //         ESP_LOGI(TAG, "CMD 0x%02X Canceled! CMD_ID = %d", s_slots[test_data[0]].ctx.target_cmd, test_data[0]);
-    //         break;
-    //     }
-    //     default:
-    //         break;
-    // }
+    switch(cmd) {
+        case 0x01:
+            Player::getInstance().play();
+            break;
+        case 0x02:
+            Player::getInstance().pause();
+            break;
+        case 0x03:
+            Player::getInstance().reset();
+            break;
+        case 0x04:
+            Player::getInstance().release();
+            break;
+        case 0x05:
+            Player::getInstance().load();
+            break;
+        case 0x06:
+            Player::getInstance().test(test_data[0], test_data[1], test_data[2]);
+            break;
+        // --- Cancel Command ---
+        case 0x07: {
+            esp_timer_stop(s_slots[test_data[0]].timer_handle);
+            ESP_LOGI(TAG, "CMD 0x%02X Canceled! CMD_ID = %d", s_slots[test_data[0]].ctx.target_cmd, test_data[0]);
+            break;
+        }
+        default:
+            break;
+    }
 }
 
 static void trigger_ack_task(uint8_t my_id, uint8_t cmd_id, uint8_t cmd_type, uint32_t delay_val) {
@@ -367,7 +365,7 @@ static void sync_process_task(void* arg) {
         if(xQueueReceive(s_adv_queue, &pkt, pdMS_TO_TICKS(10)) == pdTRUE) {
             int64_t now = esp_timer_get_time();
             if(pkt.cmd_id == last_processed_id) continue;
-            // new
+
             if(!collecting) {
                 collecting = true;
                 current_cmd_id = pkt.cmd_id;
@@ -418,48 +416,7 @@ static void sync_process_task(void* arg) {
                     count = 1;
                 }
             }
-            // old
-            // if(!collecting || pkt.cmd_id != current_cmd_id) {
-            //     collecting = true;
-            //     current_cmd_id = pkt.cmd_id;
-            //     current_cmd = pkt.cmd_type;
-            //     current_mask = pkt.target_mask;
-            //     current_data[0] = pkt.data[0];
-            //     current_data[1] = pkt.data[1];
-            //     current_data[2] = pkt.data[2];
-            //     sum_target = 0;
-            //     count = 0;
-            //     window_start_time = now;
-            //     window_expired = false;
-            // }
-
-            // if(collecting && !window_expired) {
-            //     if(now < (window_start_time + s_config.sync_window_us)) {
-            //         sum_target += (pkt.rx_time_us + pkt.delay_val);
-            //         count++;
-            //     } else {
-            //         window_expired = true;
-            //         if(count > 0) {
-            //             int64_t final_target = sum_target / count;
-            //             int64_t wait_us = final_target - now;
-            //             if(wait_us > 500) {
-            //                 action_slot_t* target_slot = &s_slots[current_cmd_id];
-            //                 target_slot->ctx.target_cmd = current_cmd;
-            //                 target_slot->ctx.target_mask = current_mask;
-            //                 memcpy((void*)target_slot->ctx.data, current_data, 3);
-            //                 esp_timer_stop(target_slot->timer_handle);
-            //                 esp_timer_start_once(target_slot->timer_handle, wait_us);
-            //                 last_processed_id = current_cmd_id;
-                            
-            //                 ESP_LOGI(TAG, "CMD 0x%02X Locked! Delay: %lld us", current_cmd, wait_us);
-            //                 trigger_ack_task(s_config.my_player_id, current_cmd_id, current_cmd, (uint32_t)wait_us);
-            //             }
-            //         }
-            //         collecting = false;
-            //     }
-            // }
         }
-        // ... (Check timeout logic similar to above) ...
         if(collecting && !window_expired) {
             int64_t now = esp_timer_get_time();
             if(now >= (window_start_time + s_config.sync_window_us)) {
@@ -489,7 +446,6 @@ static void sync_process_task(void* arg) {
     vTaskDelete(NULL);
 }
 
-// ... (Init/Start/Stop same as before) ...
 esp_err_t bt_receiver_init(const bt_receiver_config_t* config) {
     if(!config) return ESP_ERR_INVALID_ARG;
     s_config = *config;
