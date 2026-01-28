@@ -179,7 +179,7 @@ static void send_ack_task(void *arg) {
     uint8_t scan_buf[32];
     make_cmd_ble_set_scan_enable(scan_buf, 0, 0); // Disable Scan
     esp_vhci_host_send_packet(scan_buf, 6);
-    vTaskDelay(pdMS_TO_TICKS(50));
+    esp_rom_delay_us(5000);
 
     ESP_LOGW(TAG, ">>> ACK START: ID=%d, CMD=%d (Scan Stopped)", params->my_id, params->cmd_id);
 
@@ -215,8 +215,8 @@ static void send_ack_task(void *arg) {
     // Start Adv
     hci_cmd_send_ble_adv_enable(1);
     
-    // Broadcast for 4 Seconds
-    vTaskDelay(pdMS_TO_TICKS(4000));
+    // Broadcast for 4 Seconds?
+    vTaskDelay(pdMS_TO_TICKS(50));
     
     // Stop Adv
     hci_cmd_send_ble_adv_enable(0);
@@ -367,8 +367,8 @@ static void sync_process_task(void* arg) {
         if(xQueueReceive(s_adv_queue, &pkt, pdMS_TO_TICKS(10)) == pdTRUE) {
             int64_t now = esp_timer_get_time();
             if(pkt.cmd_id == last_processed_id) continue;
-            
-            if(!collecting || pkt.cmd_id != current_cmd_id) {
+            // new
+            if(!collecting) {
                 collecting = true;
                 current_cmd_id = pkt.cmd_id;
                 current_cmd = pkt.cmd_type;
@@ -381,11 +381,12 @@ static void sync_process_task(void* arg) {
                 window_start_time = now;
                 window_expired = false;
             }
-
-            if(collecting && !window_expired) {
-                if(now < (window_start_time + s_config.sync_window_us)) {
-                    sum_target += (pkt.rx_time_us + pkt.delay_val);
-                    count++;
+            else{
+                if (pkt.cmd_id == current_cmd_id) {
+                    if(now < (window_start_time + s_config.sync_window_us)) {
+                        sum_target += (pkt.rx_time_us + pkt.delay_val);
+                        count++;
+                    }
                 } else {
                     window_expired = true;
                     if(count > 0) {
@@ -404,9 +405,59 @@ static void sync_process_task(void* arg) {
                             trigger_ack_task(s_config.my_player_id, current_cmd_id, current_cmd, (uint32_t)wait_us);
                         }
                     }
-                    collecting = false;
+                    collecting = true;
+                    current_cmd_id = pkt.cmd_id;
+                    current_cmd = pkt.cmd_type;
+                    current_mask = pkt.target_mask;
+                    current_data[0] = pkt.data[0];
+                    current_data[1] = pkt.data[1];
+                    current_data[2] = pkt.data[2];
+                    window_start_time = now;
+                    window_expired = false;
+                    sum_target = (pkt.rx_time_us + pkt.delay_val);
+                    count = 1;
                 }
             }
+            // old
+            // if(!collecting || pkt.cmd_id != current_cmd_id) {
+            //     collecting = true;
+            //     current_cmd_id = pkt.cmd_id;
+            //     current_cmd = pkt.cmd_type;
+            //     current_mask = pkt.target_mask;
+            //     current_data[0] = pkt.data[0];
+            //     current_data[1] = pkt.data[1];
+            //     current_data[2] = pkt.data[2];
+            //     sum_target = 0;
+            //     count = 0;
+            //     window_start_time = now;
+            //     window_expired = false;
+            // }
+
+            // if(collecting && !window_expired) {
+            //     if(now < (window_start_time + s_config.sync_window_us)) {
+            //         sum_target += (pkt.rx_time_us + pkt.delay_val);
+            //         count++;
+            //     } else {
+            //         window_expired = true;
+            //         if(count > 0) {
+            //             int64_t final_target = sum_target / count;
+            //             int64_t wait_us = final_target - now;
+            //             if(wait_us > 500) {
+            //                 action_slot_t* target_slot = &s_slots[current_cmd_id];
+            //                 target_slot->ctx.target_cmd = current_cmd;
+            //                 target_slot->ctx.target_mask = current_mask;
+            //                 memcpy((void*)target_slot->ctx.data, current_data, 3);
+            //                 esp_timer_stop(target_slot->timer_handle);
+            //                 esp_timer_start_once(target_slot->timer_handle, wait_us);
+            //                 last_processed_id = current_cmd_id;
+                            
+            //                 ESP_LOGI(TAG, "CMD 0x%02X Locked! Delay: %lld us", current_cmd, wait_us);
+            //                 trigger_ack_task(s_config.my_player_id, current_cmd_id, current_cmd, (uint32_t)wait_us);
+            //             }
+            //         }
+            //         collecting = false;
+            //     }
+            // }
         }
         // ... (Check timeout logic similar to above) ...
         if(collecting && !window_expired) {
