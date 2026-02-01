@@ -71,7 +71,12 @@ typedef struct {
 } action_slot_t;
 
 static action_slot_t s_slots[MAX_CONCURRENT_ACTIONS];
-
+static struct {
+    uint8_t cmd_id;
+    uint8_t cmd_type;
+    uint32_t original_delay;
+    int64_t lock_timestamp;
+} s_last_locked_cmd = {0, 0, 0, 0};
 // ==========================================
 // Part 1: HCI Helper Functions
 // ==========================================
@@ -169,6 +174,7 @@ typedef struct {
     uint8_t cmd_id;
     uint8_t cmd_type;
     uint32_t delay_val;
+    uint8_t state;
 } ack_task_params_t;
 
 static void send_ack_task(void *arg) {
@@ -180,7 +186,7 @@ static void send_ack_task(void *arg) {
     esp_vhci_host_send_packet(scan_buf, 6);
     esp_rom_delay_us(5000);
 
-    ESP_LOGW(TAG, ">>> ACK START: ID=%d, CMD=%d (Scan Stopped)", params->my_id, params->cmd_id);
+    ESP_LOGD(TAG, ">>> ACK START: ID=%d, CMD=%d (Scan Stopped)", params->my_id, params->cmd_id);
 
     // Set Params
     hci_cmd_send_ble_set_adv_param_ack();
@@ -192,8 +198,8 @@ static void send_ack_task(void *arg) {
     
     raw_data[idx++] = 2; raw_data[idx++] = 0x01; raw_data[idx++] = 0x06;
     
-    // Ensure Length is 11
-    raw_data[idx++] = 11; 
+    // Length = 12
+    raw_data[idx++] = 12; 
     raw_data[idx++] = 0xFF; raw_data[idx++] = 0xFF; raw_data[idx++] = 0xFF; // Type + ID
     raw_data[idx++] = CMD_TYPE_ACK; // 0x08
     
@@ -205,6 +211,8 @@ static void send_ack_task(void *arg) {
     raw_data[idx++] = (params->delay_val >> 16) & 0xFF;
     raw_data[idx++] = (params->delay_val >> 8) & 0xFF;
     raw_data[idx++] = (params->delay_val) & 0xFF;
+
+    raw_data[idx++] = params->state;
     
     uint8_t hci_buf[128];
     uint16_t pkt_len = make_cmd_ble_set_adv_data(hci_buf, idx, raw_data);
@@ -218,7 +226,7 @@ static void send_ack_task(void *arg) {
     
     // Stop Adv
     hci_cmd_send_ble_adv_enable(0);
-    ESP_LOGI(TAG, ">>> ACK STOPPED. Resuming Scan.");
+    ESP_LOGD(TAG, ">>> ACK STOPPED. Resuming Scan.");
 
     // Resume Scanning
     make_cmd_ble_set_scan_enable(scan_buf, 1, 0);
@@ -298,13 +306,23 @@ static int host_rcv_pkt(uint8_t* data, uint16_t len) {
 }
 static void controller_rcv_pkt_ready(void) {}
 static esp_vhci_host_callback_t vhci_host_cb = {controller_rcv_pkt_ready, host_rcv_pkt};
-
+static void trigger_ack_task(uint8_t my_id, uint8_t cmd_id, uint8_t cmd_type, uint32_t delay_val, uint8_t state) {
+    ack_task_params_t *params = (ack_task_params_t *)malloc(sizeof(ack_task_params_t));
+    if (params) {
+        params->my_id = my_id;
+        params->cmd_id = cmd_id;
+        params->cmd_type = cmd_type;
+        params->delay_val = delay_val;
+        params->state = state;
+        xTaskCreate(send_ack_task, "ack_task", 4096, params, 5, NULL);
+    }
+}
 static void IRAM_ATTR timer_timeout_cb(void* arg) {
     action_slot_t* slot = (action_slot_t*)arg;
     uint8_t cmd = slot->ctx.target_cmd;
     uint8_t test_data[3];
     memcpy(test_data, (const uint8_t*)slot->ctx.data, 3);
-    printf(">> [ACTION TRIGGERED] CMD: 0x%02X\n", cmd);
+    ESP_LOGD(TAG,">> [ACTION TRIGGERED] CMD: 0x%02X\n", cmd);
     switch(cmd) {
         case 0x01:
             Player::getInstance().play();
@@ -322,27 +340,32 @@ static void IRAM_ATTR timer_timeout_cb(void* arg) {
             Player::getInstance().load();
             break;
         case 0x06:
-            Player::getInstance().test(test_data[0], test_data[1], test_data[2]);
+            if (test_data[0] == 0 && test_data[1] == 0 && test_data[2] == 0) {
+                // Player::getInstance().xxxAPI();
+            } else {
+                Player::getInstance().test(test_data[0], test_data[1], test_data[2]);
+            }
             break;
         // --- Cancel Command ---
-        case 0x07: {
+        case 0x07:
             esp_timer_stop(s_slots[test_data[0]].timer_handle);
-            ESP_LOGI(TAG, "CMD 0x%02X Canceled! CMD_ID = %d", s_slots[test_data[0]].ctx.target_cmd, test_data[0]);
+            ESP_LOGD(TAG, "CMD 0x%02X Canceled! CMD_ID = %d", s_slots[test_data[0]].ctx.target_cmd, test_data[0]);
+            break;
+        case 0x08:{
+            int8_t state = Player::getInstance().getState();
+            int64_t now = esp_timer_get_time();
+            int64_t target_time = s_last_locked_cmd.lock_timestamp + s_last_locked_cmd.original_delay;
+            int32_t remaining_us = (int32_t)(target_time - now);
+            if (remaining_us < 0) remaining_us = 0;
+            trigger_ack_task(s_config.my_player_id, 
+                             s_last_locked_cmd.cmd_id, 
+                             s_last_locked_cmd.cmd_type, 
+                             (uint32_t)remaining_us,
+                             state);
             break;
         }
         default:
             break;
-    }
-}
-
-static void trigger_ack_task(uint8_t my_id, uint8_t cmd_id, uint8_t cmd_type, uint32_t delay_val) {
-    ack_task_params_t *params = (ack_task_params_t *)malloc(sizeof(ack_task_params_t));
-    if (params) {
-        params->my_id = my_id;
-        params->cmd_id = cmd_id;
-        params->cmd_type = cmd_type;
-        params->delay_val = delay_val;
-        xTaskCreate(send_ack_task, "ack_task", 4096, params, 5, NULL);
     }
 }
 
@@ -398,9 +421,14 @@ static void sync_process_task(void* arg) {
                             esp_timer_stop(target_slot->timer_handle);
                             esp_timer_start_once(target_slot->timer_handle, wait_us);
                             last_processed_id = current_cmd_id;
-                            
-                            ESP_LOGI(TAG, "CMD 0x%02X Locked! Delay: %lld us", current_cmd, wait_us);
-                            trigger_ack_task(s_config.my_player_id, current_cmd_id, current_cmd, (uint32_t)wait_us);
+                            if (current_cmd != 0x08) {
+                                s_last_locked_cmd.cmd_id = current_cmd_id;
+                                s_last_locked_cmd.cmd_type = current_cmd;
+                                s_last_locked_cmd.original_delay = (uint32_t)wait_us;
+                                s_last_locked_cmd.lock_timestamp = esp_timer_get_time();
+                            }
+                            ESP_LOGD(TAG, "CMD 0x%02X Locked! Delay: %lld us", current_cmd, wait_us);
+                            // trigger_ack_task(s_config.my_player_id, current_cmd_id, current_cmd, (uint32_t)wait_us);
                         }
                     }
                     collecting = true;
@@ -434,8 +462,8 @@ static void sync_process_task(void* arg) {
                              esp_timer_start_once(target_slot->timer_handle, wait_us);
                              last_processed_id = current_cmd_id;
                              
-                             ESP_LOGI(TAG, "CMD 0x%02X Locked (Timeout)! Delay: %lld us", current_cmd, wait_us);
-                             trigger_ack_task(s_config.my_player_id, current_cmd_id, current_cmd, (uint32_t)wait_us);
+                             ESP_LOGD(TAG, "CMD 0x%02X Locked (Timeout)! Delay: %lld us", current_cmd, wait_us);
+                            //  trigger_ack_task(s_config.my_player_id, current_cmd_id, current_cmd, (uint32_t)wait_us);
                          }
                      }
                 }
