@@ -149,7 +149,7 @@ static void hci_cmd_send_ble_set_adv_param_ack(void) {
     uint8_t buf[128];
     uint8_t *p = buf;
     // Standard Interval: 200ms (320 * 0.625)
-    uint16_t interval = 320; 
+    uint16_t interval = 48; 
     
     UINT8_TO_STREAM(p, H4_TYPE_COMMAND);
     UINT16_TO_STREAM(p, 0x2006); // HCI_BLE_WRITE_ADV_PARAMS
@@ -221,8 +221,8 @@ static void send_ack_task(void *arg) {
 
     // Start Adv
     hci_cmd_send_ble_adv_enable(1);
-    
-    vTaskDelay(pdMS_TO_TICKS(50));
+    //origin: 50
+    vTaskDelay(pdMS_TO_TICKS(100));
     
     // Stop Adv
     hci_cmd_send_ble_adv_enable(0);
@@ -357,6 +357,8 @@ static void IRAM_ATTR timer_timeout_cb(void* arg) {
             int64_t target_time = s_last_locked_cmd.lock_timestamp + s_last_locked_cmd.original_delay;
             int32_t remaining_us = (int32_t)(target_time - now);
             if (remaining_us < 0) remaining_us = 0;
+            // Safety Delay
+            vTaskDelay(pdMS_TO_TICKS(150));
             trigger_ack_task(s_config.my_player_id, 
                              s_last_locked_cmd.cmd_id, 
                              s_last_locked_cmd.cmd_type, 
@@ -479,7 +481,13 @@ esp_err_t bt_receiver_init(const bt_receiver_config_t* config) {
     s_config = *config;
     s_adv_queue = xQueueCreate(s_config.queue_size, sizeof(ble_rx_packet_t));
     if(!s_adv_queue) return ESP_ERR_NO_MEM;
-    esp_timer_create_args_t timer_args = {.callback = &timer_timeout_cb, .name = "bt_slot_tmr"};
+    esp_timer_create_args_t timer_args = {
+        .callback = &timer_timeout_cb,
+        .arg = NULL,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "bt_slot_tmr",
+        .skip_unhandled_events = false
+    };
     for(int i = 0; i < MAX_CONCURRENT_ACTIONS; i++) {
         timer_args.arg = (void*)&s_slots[i];
         esp_timer_create(&timer_args, &s_slots[i].timer_handle);
